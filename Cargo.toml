@@ -1,0 +1,18 @@
+[package]
+name = "CAIManager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = {version = "1.39.2", features = ["full"]}
+log = "*"
+env_logger = "*"
+serde_json = "*"
+futures-util = "0.3.30"
+axum = {version = "0.7.5", features = ["ws", "http2"]}
+serde = {version = "1.0.204", features = ["derive"]}
+once_cell = "1.19.0"
+tower-http = {version = "0.5.2", features = ["cors"] }
+rustls-pemfile = "2.1.3"
+axum-server = {version = "0.7.1", features = ["tls-rustls-no-provider"]}
+rustls = {version = "*", default-features = false, features = ["ring"]}
