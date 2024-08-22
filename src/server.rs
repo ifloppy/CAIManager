@@ -9,7 +9,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
-use log::{error, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
@@ -71,6 +71,10 @@ async fn m_logging(request: Request, next: Next) -> Response {
     let uri_path = request.uri().path().to_string();
     let method = request.method().to_string();
 
+    debug!("==========REQUEST BEGIN==========");
+    debug!("Request Headers: {:?}", *request.headers());
+    debug!("Request Body: {:?}", request.body());
+
     // Process the request
     let response = next.run(request).await;
 
@@ -82,7 +86,12 @@ async fn m_logging(request: Request, next: Next) -> Response {
         "IP: {}, URI Path: {}, Method: {}, Status: {}",
         ip, uri_path, method, status
     );
-
+    
+    debug!("Response Headers: {:?}", *response.headers());
+    debug!("Response Body: {:?}", response.body());
+    
+    
+    debug!("==========REQUEST END==========");
     response
 }
 
