@@ -94,7 +94,7 @@ impl Instance {
             sender,
             last_log: Arc::new(Mutex::new(String::new())),
             logging_handler: None,
-            manually_stopped: false,
+            manually_stopped: true,
             stdin: None,
         }
     }
