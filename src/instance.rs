@@ -2,13 +2,13 @@ use log::{debug, error, info, trace, warn};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap, path::Path, sync::{Arc, Mutex}
+    collections::HashMap, path::Path, sync::Arc
 };
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
     process,
-    sync::{broadcast, mpsc, oneshot},
+    sync::{broadcast, mpsc, oneshot, Mutex},
     task,
 };
 
@@ -78,7 +78,7 @@ pub type InstanceOperationResult = Result<OkResult, String>;
 
 pub struct Instance {
     instance_info: InstanceInfo,
-    process: Option<process::Child>,
+    process: Option<Mutex<process::Child>>,
     sender: broadcast::Sender<String>,
     last_log: Arc<Mutex<String>>,
     logging_handler: Option<task::JoinHandle<()>>,
@@ -126,7 +126,7 @@ impl Instance {
                     output_printer(&mut output, sender, last_log).await;
                 }));
 
-                self.process = Some(p);
+                self.process = Some(Mutex::new(p));
                 self.manually_stopped = false;
                 Ok(OkResult::None)
             }
@@ -152,7 +152,7 @@ impl Instance {
     async fn halt(&mut self) -> InstanceOperationResult {
         if let Some(process) = self.process.as_mut() {
             self.manually_stopped = true;
-            if let Err(e) = process.kill().await {
+            if let Err(e) = process.lock().await.kill().await {
                 return Err(format!("Failed to kill process: {}", e));
             }
         } else {
@@ -161,16 +161,29 @@ impl Instance {
         Ok(OkResult::None)
     }
 
-    fn status(&self) -> InstanceStatus {
-        match self.process {
-            Some(ref p) if p.id().is_some() => InstanceStatus::Running,
+    async fn status(&self) -> InstanceStatus {
+        match &self.process {
+            Some(p) => {
+                let mut p = p.lock().await;
+                match p.try_wait() {
+                    Ok(Some(_)) => {
+                        InstanceStatus::Stopped
+                    },
+                    Ok(None) => {
+                        InstanceStatus::Running
+                    }
+                    Err(_) => {
+                        InstanceStatus::Stopped
+                    },
+                }
+            },
             _ => InstanceStatus::Stopped,
         }
     }
 
     async fn get_log(&self) -> String {
         let last_log = self.last_log.lock();
-        last_log.unwrap().clone()
+        last_log.await.clone()
     }
 }
 
@@ -257,7 +270,7 @@ async fn instance_update(
     match instance_map.get_mut(&name) {
         None => Err("Invalid instance name".to_string()),
         Some(instance) => {
-            if instance.status() == InstanceStatus::Running {
+            if instance.status().await == InstanceStatus::Running {
                 Err("Cannot update running instance".to_string())
             } else {
                 instance.instance_info = new_info;
@@ -285,14 +298,14 @@ fn instance_create(
     return InstanceOperationResult::Ok(OkResult::None);
 }
 
-fn instance_start(
+async fn instance_start(
     instance_map: &mut HashMap<String, Instance>,
     name: String,
 ) -> InstanceOperationResult {
     match instance_map.get_mut(&name) {
         None => Err("Invalid instance name".to_string()),
         Some(instance) => {
-            if instance.status() == InstanceStatus::Running {
+            if instance.status().await == InstanceStatus::Running {
                 Err("Instance is already running".to_string())
             } else {
                 instance.start()
@@ -309,7 +322,7 @@ async fn instance_execute(
     match instance_map.get_mut(&name) {
         None => Err("Invalid instance name".to_string()),
         Some(instance) => {
-            if instance.status() == InstanceStatus::Stopped {
+            if instance.status().await == InstanceStatus::Stopped {
                 Err("Instance is stopped".to_string())
             } else {
                 instance.execute(&command).await
@@ -325,7 +338,7 @@ async fn instance_stop(
     match instance_map.get_mut(&name) {
         None => Err("Invalid instance name".to_string()),
         Some(instance) => {
-            if instance.status() == InstanceStatus::Stopped {
+            if instance.status().await == InstanceStatus::Stopped {
                 Err("Instance is already stopped".to_string())
             } else {
                 instance.manually_stopped = true;
@@ -337,7 +350,7 @@ async fn instance_stop(
     }
 }
 
-fn instance_try_remove(
+async fn instance_try_remove(
     instance_map: &mut HashMap<String, Instance>,
     name: String,
 ) -> InstanceOperationResult {
@@ -345,7 +358,7 @@ fn instance_try_remove(
         None => Err("Invalid instance name".to_string()),
         Some(instance) => {
             let name = instance.instance_info.name.clone();
-            if instance.status() == InstanceStatus::Running {
+            if instance.status().await == InstanceStatus::Running {
                 Err("Instance is still running, please stop it first!".to_string())
             } else {
                 instance_map.remove(&name);
@@ -370,7 +383,7 @@ async fn output_printer(
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]);
                 {
-                    let mut last_log = last_log.lock().unwrap();
+                    let mut last_log = last_log.lock().await;
                     last_log.push_str(&chunk);
                     if last_log.len() > 10240 {
                         // Ensure we don't cut off in the middle of a UTF-8 character
@@ -394,11 +407,11 @@ async fn output_printer(
     }
 }
 
-fn auto_resume(
+async fn auto_resume(
     instance_map: &mut HashMap<String, Instance>,
 ) {
     for (name, instance) in instance_map.iter_mut() {
-        if (instance.instance_info.auto_restart) && (instance.status() == InstanceStatus::Stopped) && (!instance.manually_stopped) {
+        if (instance.instance_info.auto_restart) && (instance.status().await == InstanceStatus::Stopped) && (!instance.manually_stopped) {
             info!("Accidently stopped instance detected, restarting: {}", name);
             let _ = instance.start();
         }
@@ -412,7 +425,7 @@ pub async fn instance_broker(
     debug!("Instance broker started");
 
     {
-        let mut g = BROKER_SENDER.lock().unwrap();
+        let mut g = BROKER_SENDER.lock().await;
         *g = Some(sender);
     }
 
@@ -448,7 +461,7 @@ pub async fn instance_broker(
                 let _ = operation
                     .result
                     .unwrap()
-                    .send(instance_start(&mut instance_map, name));
+                    .send(instance_start(&mut instance_map, name).await);
             }
             IOperationTypes::Stop(name) => {
                 let result = instance_stop(&mut instance_map, name).await;
@@ -464,7 +477,7 @@ pub async fn instance_broker(
                 let _ = operation
                     .result
                     .unwrap()
-                    .send(instance_try_remove(&mut instance_map, name));
+                    .send(instance_try_remove(&mut instance_map, name).await);
             }
             IOperationTypes::Execute(name, command) => {
                 let _ = operation
@@ -488,12 +501,12 @@ pub async fn instance_broker(
                 let _ = operation.result.unwrap().send(instance_save(&instance_map).await);
             }
             IOperationTypes::ListInstances => {
-                let instances: Vec<RespInstanceInfo> = instance_map
-                    .values()
-                    .map(|instance| {
-                        RespInstanceInfo::new(instance.instance_info.clone(), instance.status())
+                let instances: Vec<RespInstanceInfo> = futures_util::future::join_all(
+                    instance_map.values().map(|instance| async {
+                        RespInstanceInfo::new(instance.instance_info.clone(), instance.status().await)
                     })
-                    .collect();
+                ).await;
+                
                 let _ = operation.result.unwrap().send(Ok(OkResult::Message(
                     serde_json::to_string(&instances).unwrap(),
                 )));
@@ -509,7 +522,7 @@ pub async fn instance_broker(
                 }
             }
             IOperationTypes::KeepInstanceRunning => {
-                auto_resume(&mut instance_map);
+                auto_resume(&mut instance_map).await;
             }
         }
     }
