@@ -17,6 +17,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::instance::{self, IOperationTypes};
 use crate::EXPECTED_TOKEN;
+use crate::sysinfo;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SrvMessage {
@@ -34,6 +35,8 @@ pub fn get_router(operation_channel: mpsc::Sender<instance::IOperation>) -> Rout
         .route("/instances", get(r_instance_list))
         .route("/instances/save", post(r_instance_save))
         .route("/instances/:name", post(r_instance_update))
+        .route("/system/info", get(r_sysinfo))
+        .route("/system/status", get(r_sysstatus))
         .layer(middleware::from_fn(m_authentication))
         .route("/instances/log_reader/:name", get(ws_log_reader));
     Router::new()
@@ -530,4 +533,13 @@ async fn handle_socket(
 
     let _ = socket.close().await;
 }
-    
+
+async fn r_sysinfo() -> impl IntoResponse {
+    Json(sysinfo::get_system_info())
+}
+
+async fn r_sysstatus() -> impl IntoResponse {
+    let src = sysinfo::USED_RESOURCE.lock().unwrap();
+    let json = serde_json::to_string(&*src).unwrap();
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], json)
+}

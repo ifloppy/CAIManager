@@ -16,3 +16,4 @@ tower-http = {version = "0.5.2", features = ["cors"] }
 rustls-pemfile = "2.1.3"
 axum-server = {version = "0.7.1", features = ["tls-rustls-no-provider"]}
 rustls = {version = "*", default-features = false, features = ["ring"]}
+sysinfo = "0.31.4"

@@ -3,6 +3,8 @@ use instance::IOperation;
 use log::{debug, error, info};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sysinfo::get_system_info;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -11,6 +13,7 @@ use tokio::signal;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
+mod sysinfo;
 mod instance;
 mod server;
 
@@ -42,7 +45,8 @@ async fn main() {
 
     let (iop_sender, iop_receiver) = mpsc::channel::<instance::IOperation>(32);
 
-    
+    debug!("{}", json!(get_system_info()));
+    tokio::task::spawn(sysinfo::sys_info_getter());
 
     tokio::task::spawn(instance::instance_broker(iop_receiver, iop_sender.clone()));
 
