@@ -6,11 +6,12 @@ use std::{
 };
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
     process,
     sync::{broadcast, mpsc, oneshot, Mutex},
     task,
 };
+use tokio::io::AsyncBufReadExt;
 
 static BROKER_SENDER: Lazy<Mutex<Option<mpsc::Sender<IOperation>>>> =
     Lazy::new(|| Mutex::new(None));
@@ -117,13 +118,14 @@ impl Instance {
 
         match cmd.spawn() {
             Ok(mut p) => {
-                let mut output = p.stdout.take().unwrap();
+                let mut stdout = p.stdout.take().unwrap();
+                let mut stderr = p.stderr.take().unwrap();
                 self.stdin = Some(p.stdin.take().unwrap());
                 let sender = self.sender.clone();
                 let last_log = self.last_log.clone(); // Clone the Arc
 
                 self.logging_handler = Some(tokio::spawn(async move {
-                    output_printer(&mut output, sender, last_log).await;
+                    output_printer(&mut stdout, &mut stderr, sender, last_log).await;
                 }));
 
                 self.process = Some(Mutex::new(p));
@@ -140,7 +142,7 @@ impl Instance {
 
     async fn execute(&mut self, command: &String) -> InstanceOperationResult {
         if let Some(stdin) = self.stdin.as_mut() {
-            if let Err(e) = stdin.write_all(format!("{}\n", command).as_bytes()).await {
+            if let Err(e) = stdin.write_all(format!("{}\r\n", command).as_bytes()).await {
                 return Err(format!("Failed to write to stdin: {}", e));
             }
         } else {
@@ -370,42 +372,56 @@ async fn instance_try_remove(
 
 async fn output_printer(
     stdout: &mut process::ChildStdout,
+    stderr: &mut process::ChildStderr,
     sender: broadcast::Sender<String>,
     last_log: Arc<Mutex<String>>,
 ) {
-    let mut buf = [0; 1024];
+    let stdout_reader = BufReader::new(stdout);
+    let stderr_reader = BufReader::new(stderr);
+    let mut stdout_lines = stdout_reader.lines();
+    let mut stderr_lines = stderr_reader.lines();
 
     loop {
-        match stdout.read(&mut buf).await {
-            Ok(0) => {
-                continue;
-            }
-            Ok(n) => {
-                let chunk = String::from_utf8_lossy(&buf[..n]);
-                {
-                    let mut last_log = last_log.lock().await;
-                    last_log.push_str(&chunk);
-                    if last_log.len() > 10240 {
-                        // Ensure we don't cut off in the middle of a UTF-8 character
-                        let excess = last_log.len() - 10240;
-                        let valid_up_to = last_log
-                            .char_indices()
-                            .rev()
-                            .find(|&(i, _)| i <= excess)
-                            .map(|(i, _)| i)
-                            .unwrap_or(0);
-                        last_log.drain(..valid_up_to);
-                    }
+        tokio::select! {
+            line = stdout_lines.next_line() => match line {
+                Ok(Some(line)) => {
+                    handle_line(line, &sender, &last_log).await;
                 }
-                let _ = sender.send(chunk.to_string());
-            }
-            Err(e) => {
-                error!("Output printer encountered an error: {}", e);
-                break;
-            }
+                Ok(None) | Err(_) => break,
+            },
+            line = stderr_lines.next_line() => match line {
+                Ok(Some(line)) => {
+                    handle_line(line, &sender, &last_log).await;
+                }
+                Ok(None) | Err(_) => break,
+            },
         }
     }
 }
+
+async fn handle_line(
+    line: String,
+    sender: &broadcast::Sender<String>,
+    last_log: &Arc<Mutex<String>>,
+) {
+    {
+        let mut last_log = last_log.lock().await;
+        last_log.push_str(&line);
+        last_log.push_str("\r\n");
+        if last_log.len() > 10240 {
+            let excess = last_log.len() - 10240;
+            let valid_up_to = last_log
+                .char_indices()
+                .rev()
+                .find(|&(i, _)| i <= excess)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            last_log.drain(..valid_up_to);
+        }
+    }
+    let _ = sender.send(line+"\r\n");
+}
+
 
 async fn auto_resume(
     instance_map: &mut HashMap<String, Instance>,
